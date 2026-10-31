@@ -1,6 +1,6 @@
 import { expect, test } from 'claude-code/testing'
 
-import { ticketKey } from '../hooks/register'
+import { ticketKey, titleArgs } from '../hooks/register'
 
 const PANE = {
   plugin: 'github',
@@ -25,14 +25,24 @@ async function settle() {
   for (let n = 0; n < 400; n++) await Promise.resolve()
 }
 
-function engine(on: any, opts: { commands?: string[]; store?: Map<string, unknown> } = {}) {
+function engine(on: any, opts: { commands?: string[]; store?: Map<string, unknown>; draft?: string; unplaced?: string } = {}) {
   const store = opts.store ?? new Map<string, unknown>()
   const ran: { command: string; args: string }[] = []
+  const filled: string[] = []
+  on('prompt.read', () => ({ value: { text: opts.draft ?? '', cursor: 0 } as any }))
+  on('prompt.fill', (_: unknown, e: any) => {
+    filled.push(e.text)
+    return { isFilled: true, text: e.text, cursor: e.text.length } as any
+  })
   on('command.register', () => ({ value: { command: 'github' } }))
   // The clock: no waiting in a test.
   on('clock.sleep', () => ({ value: undefined }))
   on('command.list', () => ({ value: (opts.commands ?? []).map(name => ({ name, description: '' })) }))
-  on('ui.open', () => ({ value: { isPlaced: true } }))
+  const opened: { id: string; title?: string }[] = []
+  on('ui.open', (_: unknown, e: any) => {
+    opened.push({ id: e.id, title: e.title })
+    return { value: e.id === opts.unplaced ? { isPlaced: false, reason: 'narrow' } : { isPlaced: true } } as any
+  })
   on('ui.close', () => ({ value: undefined }))
   on('ui.toast', () => ({ value: undefined }))
   on('ui.focus', () => ({}))
@@ -44,7 +54,7 @@ function engine(on: any, opts: { commands?: string[]; store?: Map<string, unknow
     store.set(e.key, e.value)
     return { value: undefined }
   })
-  return { store, ran }
+  return { store, ran, filled, opened }
 }
 
 test('a ticket key from a branch or a title, not a phase or a version', () => {
@@ -172,13 +182,8 @@ test('through gh: the search sent typed, the rows from what it answers', async (
   expect(Array.isArray(store.get('prs:mine'))).toBe(true)
 })
 
-test('with the Linear mod: the PR names its issue, a press opens it there', async ($, on) => {
-  engine(on, { commands: ['github', 'linear'] })
-  const opened: any[] = []
-  on('command.run', { command: 'linear' }, (_: unknown, e: any) => {
-    opened.push(e)
-    return { text: '' }
-  })
+test('with the Linear mod: the PR names its issue; a press opens the Linear pane on it, as the press', async ($, on) => {
+  const { opened, filled } = engine(on, { commands: ['github', 'linear'] })
   await $.session.start({ cwd: '/repo', surface: 'terminal', isInteractive: true })
   await ($.command.run as any)({ command: 'github', args: 'demo pr halcyon/notes-app#479' })
   await settle()
@@ -186,8 +191,27 @@ test('with the Linear mod: the PR names its issue, a press opens it there', asyn
   expect(await ui.find({ type: 'Button', key: 'linear' })).toBeDefined()
   await ui.press({ key: 'linear' })
   await settle()
-  expect(opened[0]?.args).toBe('demo issue HAL-231 from:github')
+  expect(opened.at(-1)).toEqual({ id: 'linear', title: 'Linear ⟨demo issue HAL-231 from:github⟩' })
+  expect(filled).toEqual([])
   await ui.unmount()
+})
+
+test('the Linear pane not drawn: its command goes in the prompt, for Enter; a draft is kept', async ($, on) => {
+  const { filled } = engine(on, { commands: ['github', 'linear'], unplaced: 'linear' })
+  await $.session.start({ cwd: '/repo', surface: 'terminal', isInteractive: true })
+  await ($.command.run as any)({ command: 'github', args: 'demo pr halcyon/notes-app#479' })
+  await settle()
+  const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
+  await ui.press({ key: 'linear' })
+  await settle()
+  expect(filled).toEqual(['/linear demo issue HAL-231 from:github'])
+  await ui.unmount()
+})
+
+test('opened by the Linear mod: its arguments are read from the title', () => {
+  expect(titleArgs('GitHub ⟨demo pr halcyon/notes-app#482 from:linear⟩')).toBe('demo pr halcyon/notes-app#482 from:linear')
+  expect(titleArgs('GitHub')).toBe(null)
+  expect(titleArgs(undefined)).toBe(null)
 })
 
 test('the pane draws on every surface', async ($, on) => {
@@ -202,13 +226,8 @@ test('the pane draws on every surface', async ($, on) => {
   }
 })
 
-test('opened from the Linear mod: its crumb, and back goes back there', async ($, on) => {
-  engine(on, { commands: ['github', 'linear'] })
-  const linear: string[] = []
-  on('command.run', { command: 'linear' }, (_: unknown, e: any) => {
-    linear.push(e.args)
-    return { text: '' }
-  })
+test('opened from the Linear mod: its crumb, and back opens the Linear pane as it was', async ($, on) => {
+  const { opened } = engine(on, { commands: ['github', 'linear'] })
   await $.session.start({ cwd: '/repo', surface: 'terminal', isInteractive: true })
   await ($.command.run as any)({ command: 'github', args: 'demo pr halcyon/notes-app#482 from:linear' })
   await settle()
@@ -216,7 +235,7 @@ test('opened from the Linear mod: its crumb, and back goes back there', async ($
   expect(await ui.find({ type: 'Text', text: 'Linear ›' })).toBeDefined()
   await ui.press({ key: 'back' })
   await settle()
-  expect(linear).toEqual(['back'])
+  expect(opened.at(-1)).toEqual({ id: 'linear', title: 'Linear ⟨back⟩' })
   await ui.unmount()
 })
 
@@ -309,3 +328,4 @@ test('Start: a cloud session on the PR, from a checkout of its repo, kept among 
   expect(ran.some(a => a.includes('--bg'))).toBe(false)
   await ui.unmount()
 })
+

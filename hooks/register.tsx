@@ -482,21 +482,82 @@ async function back($: EngineInterface, key: string | null) {
   await focusOn($, at >= 0 && key ? `pr-${key}` : 'filter')
 }
 
+// To another mod's pane: this one closes, and this mod opens that one, by
+// its id, which that mod draws. Opened here, as the answer to the person's
+// press, it's drawn at any width with the keyboard in it; a pane a mod opens
+// for another on its own would get neither (Claude Code holds it undrawn
+// under 144 columns). What it's to show goes in its title: `⟨args⟩`, which
+// that mod reads and puts right. Should it not be drawn, the command goes in
+// the prompt instead, for Enter.
+async function jump($: EngineInterface, command: string, args: string, name: string) {
+  await $.ui.close({ id: PANE }).catch(() => undefined)
+  const r = await $.ui
+    .open({ id: command, title: `${name} ⟨${args}⟩`, focus: true, closeOnEscape: true, holdToasts: true, rows: 1000, columns: 1000 })
+    .catch(() => ({ isPlaced: false }))
+  if (r.isPlaced) return
+  const text = `/${command} ${args}`
+  const box = await $.prompt.read().catch(() => ({ text: '' }))
+  const draft = box.text.trim()
+  if (draft && !/^\/(linear|github)(\s|$)/.test(draft)) return $.ui.toast(`${text} opens ${name}.`)
+  const filled = await $.prompt.fill({ text, mode: 'replace' }).catch(() => ({ isFilled: false }))
+  $.ui.toast(filled.isFilled ? `Enter opens ${name}.` : `${text} opens ${name}.`)
+}
+
 // Back to the pane this one was opened from: it closes, that one opens.
 async function goBackFrom($: EngineInterface): Promise<boolean> {
   const was = await read($, from)
   if (!was) return false
   await update($, from, () => null)
-  await $.ui.close({ id: PANE }).catch(() => undefined)
-  await $.command.run({ command: was, args: 'back' } as any).catch(() => undefined)
+  await jump($, was, 'back', was === 'github' ? 'GitHub' : was === 'linear' ? 'Linear' : was)
   return true
 }
 
 // The Linear mod on an issue, from this pane: there, and Esc there back here.
 async function openLinear($: EngineInterface, issueKey: string) {
   const demo = await read($, isDemo)
-  await $.ui.close({ id: PANE }).catch(() => undefined)
-  await $.command.run({ command: 'linear', args: `${demo ? 'demo ' : ''}issue ${issueKey} from:github` } as any).catch(() => undefined)
+  await jump($, 'linear', `${demo ? 'demo ' : ''}issue ${issueKey} from:github`, 'Linear')
+}
+
+// What /github and its arguments do: also how the Linear mod's pane opens
+// this one (in its title, as below).
+async function arrive($: EngineInterface, args: string) {
+  await update($, notice, () => null)
+  const words = args.trim().split(/\s+/).filter(Boolean)
+  // `back`: another mod's pane closed, and this one opens as it was left.
+  if (words[0] === 'back') {
+    if ((await read($, view)).screen === 'list') await focusOn($, 'filter')
+    else await openPane($)
+    return
+  }
+  const demo = words.includes('demo')
+  await update($, isDemo, () => demo)
+  await update($, from, () => words.find(w => w.startsWith('from:'))?.slice(5) ?? null)
+  hasLinear = (await $.command.list()).some(c => c.name === 'linear')
+  if (demo) await update($, repoTab, () => null)
+  const own = await sessionRepo($)
+  if (!(await read($, repoTab))) await update($, repoTab, () => own)
+  const kept = (await $.store.get('tab')) as Tab | undefined
+  if (kept && TABS.includes(kept) && !demo) await update($, tab, () => kept)
+  if (demo) await update($, tab, () => 'mine')
+  const prAt = words.indexOf('pr')
+  const target = prAt >= 0 ? words[prAt + 1] : undefined
+  if (target) {
+    await openPane($)
+    await openPR($, target.replace(/^https:\/\/github\.com\/([^/]+\/[^/]+)\/pull\/(\d+).*$/, '$1#$2'))
+    return
+  }
+  if ((await read($, view)).screen !== 'list') await update($, view, (): View => ({ screen: 'list' }))
+  for (const t of TABS) void load($, t)
+  await update($, selected, () => 0)
+  await focusOn($, 'filter')
+  return
+}
+
+// The arguments another mod's pane opens this one with, from its title
+// (`Name ⟨args⟩`), or null for an ordinary title.
+export function titleArgs(title: string | undefined): string | null {
+  const m = /⟨(.*)⟩/.exec(title ?? '')
+  return m ? m[1]! : null
 }
 
 export const register: Register = on => {
@@ -511,37 +572,21 @@ export const register: Register = on => {
   // /github, /github demo, /github pr owner/repo#n, with from:<mod> when
   // another mod opened it, to go back to with Esc.
   on('command.run', { command: 'github' }, async ($, e) => {
-    await update($, notice, () => null)
-    const words = e.args.trim().split(/\s+/).filter(Boolean)
-    // `back`: another mod's pane closed, and this one opens as it was left.
-    if (words[0] === 'back') {
-      if ((await read($, view)).screen === 'list') await focusOn($, 'filter')
-      else await openPane($)
-      return { text: 'GitHub pane opened.' }
-    }
-    const demo = words.includes('demo')
-    await update($, isDemo, () => demo)
-    await update($, from, () => words.find(w => w.startsWith('from:'))?.slice(5) ?? null)
-    hasLinear = (await $.command.list()).some(c => c.name === 'linear')
-    if (demo) await update($, repoTab, () => null)
-    const own = await sessionRepo($)
-    if (!(await read($, repoTab))) await update($, repoTab, () => own)
-    const kept = (await $.store.get('tab')) as Tab | undefined
-    if (kept && TABS.includes(kept) && !demo) await update($, tab, () => kept)
-    if (demo) await update($, tab, () => 'mine')
-    const prAt = words.indexOf('pr')
-    const target = prAt >= 0 ? words[prAt + 1] : undefined
-    if (target) {
-      await openPane($)
-      await openPR($, target.replace(/^https:\/\/github\.com\/([^/]+\/[^/]+)\/pull\/(\d+).*$/, '$1#$2'))
-      return { text: 'GitHub pane opened.' }
-    }
-    if ((await read($, view)).screen !== 'list') await update($, view, (): View => ({ screen: 'list' }))
-    for (const t of TABS) void load($, t)
-    await update($, selected, () => 0)
-    await focusOn($, 'filter')
+    await arrive($, e.args)
     return { text: 'GitHub pane opened.' }
   })
+
+  // The Linear mod opens this pane itself, as the person's press there (so
+  // it's drawn at any width, with the keyboard), the arguments in its title:
+  // `GitHub ⟨issue KEY from:x⟩`. The title is put right, then they're acted on.
+  on('ui.open', async ($, e, next) => {
+    const args = e.id === PANE ? titleArgs(e.title) : null
+    if (args === null) return next(e)
+    const r = await next({ ...e, title: 'GitHub' })
+    void arrive($, args)
+    return r
+  })
+
 
   // Esc: a menu closes alone; a PR goes back to the list (or to the pane it
   // was opened from); the repo picker to the list; on the list the first Esc

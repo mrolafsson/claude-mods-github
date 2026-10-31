@@ -253,6 +253,10 @@ installed too, the two find each other, with nothing to configure:
   links to GitHub. **g** (or a click) opens one here.
 - **Esc** in the pane you went to comes back to the one you came from, as you
   left it.
+- In a terminal too narrow for Claude Code to draw the other pane (it holds
+  back a pane a mod opens by itself under 110 columns, which a jump by Esc
+  is), the command is put in the prompt instead: Enter opens it. A draft
+  you're typing is left alone.
 
 ![A PR's Linear issue, in the Linear pane](docs/images/linear.png)
 
