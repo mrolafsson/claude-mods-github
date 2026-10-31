@@ -1,0 +1,10 @@
+{
+  "name": "github",
+  "version": "0.1.0",
+  "description": "Your GitHub pull requests in a pane: what's waiting on you, a PR with its checks and reviews, draft ↔ ready, merge, worktrees, start in a Claude Code cloud session",
+  "types": "./types/index.d.ts",
+  "author": {
+    "name": "Hjortur Stefan Olafsson"
+  },
+  "license": "MIT"
+}

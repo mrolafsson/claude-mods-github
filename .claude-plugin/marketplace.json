@@ -1,0 +1,13 @@
+{
+  "name": "claude-mods-github",
+  "description": "GitHub pull requests in a Claude Code pane",
+  "owner": {
+    "name": "Hjortur Stefan Olafsson"
+  },
+  "plugins": [
+    {
+      "name": "github",
+      "source": "./"
+    }
+  ]
+}
