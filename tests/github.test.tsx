@@ -1,5 +1,6 @@
 import { expect, test } from 'claude-code/testing'
 
+import { goTo } from '../hooks/local'
 import { ticketKey, titleArgs } from '../hooks/register'
 
 const PANE = {
@@ -361,4 +362,38 @@ test('a merge queue: ready, it joins the queue (pinned to the commit shown); in,
   ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
   expect(await ui.find({ type: 'Button', key: 'opt-dequeue' })).toBeDefined()
   await ui.unmount()
+})
+
+test('to a PR\'s session: its herdr pane if running there, else a new herdr tab resuming it, else tmux, else nothing', async () => {
+  const agent = { session: 'sess-1', name: 'Offline sync conflicts', how: 'opened' as const, status: 'gone', cwd: '/code/notes-app', bg: null }
+  let env = '/run/herdr.sock|'
+  let live = true
+  const ran: string[][] = []
+  const ok = (stdout: string) => ({ exitCode: 0, stdout, stderr: '' })
+  // Only what goTo uses: processes.
+  const $ = {
+    process: {
+      run: async (argv: string[]) => {
+        ran.push([...argv])
+        if (argv[0] === 'sh') return ok(env)
+        if (argv.join(' ') === 'herdr agent list') return ok(JSON.stringify({ result: { agents: live ? [{ pane_id: 'wA:p1', agent_session: { value: 'sess-1' } }] : [] } }))
+        if (argv[1] === 'tab') return ok(JSON.stringify({ result: { root_pane: { pane_id: 'wB:p1' } } }))
+        return ok('')
+      },
+    },
+  } as any
+  expect(await goTo($, agent)).toBe('Switched to Offline sync conflicts, in its herdr pane.')
+  expect(ran.at(-1)).toEqual(['herdr', 'agent', 'focus', 'wA:p1'])
+
+  live = false
+  expect(await goTo($, agent)).toBe('Offline sync conflicts is open again, in a new herdr tab.')
+  expect(ran.find(a => a[1] === 'tab')).toEqual(['herdr', 'tab', 'create', '--cwd', '/code/notes-app', '--label', 'Offline sync conflicts', '--focus'])
+  expect(ran.at(-1)).toEqual(['herdr', 'pane', 'run', 'wB:p1', 'claude --resume sess-1'])
+
+  env = '|/tmp/tmux-1/default,1,0'
+  expect(await goTo($, { ...agent, bg: 'ab12cd34' })).toBe('Offline sync conflicts is open again, in a new tmux window.')
+  expect(ran.at(-1)).toEqual(['tmux', 'new-window', '-c', '/code/notes-app', '-n', 'Offline sync conflicts', 'claude attach ab12cd34'])
+
+  env = '|'
+  expect(await goTo($, agent)).toBe(null)
 })

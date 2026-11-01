@@ -278,3 +278,47 @@ export async function agentsOf($: EngineInterface, prs: PR[]): Promise<Record<st
 
 // What takes you to an agent: reattach a background session, resume another.
 export const agentCommand = (a: Agent) => (a.link ? a.link : a.bg ? `claude attach ${a.bg}` : `${a.cwd ? `cd ${q(a.cwd)} && ` : ''}claude --resume ${a.session}`)
+
+// ── Going to a PR's session ──────────────────────────────────────────────────
+
+// Takes the person to a Claude Code session, where the terminal they're in
+// can: Claude Code itself can't switch to another session. In herdr, its
+// pane if it's running there (herdr knows each pane's Claude session), else
+// a new tab resuming it in its folder; in tmux, a new window doing that.
+// Says what it did, or null where it can't (the command is copied instead).
+export async function goTo($: EngineInterface, a: Agent): Promise<string | null> {
+  const env = (await sh($, 'printf "%s|%s" "$HERDR_SOCKET_PATH" "$TMUX"')).stdout
+  const [herdr, tmux] = env.split('|')
+  const command = a.bg ? `claude attach ${a.bg}` : `claude --resume ${a.session}`
+  if (herdr) {
+    const list = await run($, ['herdr', 'agent', 'list'])
+    let agents: any[] = []
+    try {
+      agents = JSON.parse(list.stdout).result?.agents ?? []
+    } catch {
+      agents = []
+    }
+    const live = agents.find(x => x?.agent_session?.value === a.session)
+    if (live?.pane_id) {
+      const r = await run($, ['herdr', 'agent', 'focus', String(live.pane_id)])
+      if (r.exitCode === 0) return `Switched to ${a.name}, in its herdr pane.`
+    }
+    const tab = await run($, ['herdr', 'tab', 'create', ...(a.cwd ? ['--cwd', a.cwd] : []), '--label', a.name.slice(0, 40), '--focus'])
+    let pane: string | undefined
+    try {
+      const res = JSON.parse(tab.stdout).result
+      pane = res?.root_pane?.pane_id ?? res?.root_pane?.id
+    } catch {
+      pane = undefined
+    }
+    if (pane) {
+      const r = await run($, ['herdr', 'pane', 'run', pane, command])
+      if (r.exitCode === 0) return `${a.name} is open again, in a new herdr tab.`
+    }
+  }
+  if (tmux) {
+    const r = await run($, ['tmux', 'new-window', ...(a.cwd ? ['-c', a.cwd] : []), '-n', a.name.slice(0, 30), command])
+    if (r.exitCode === 0) return `${a.name} is open again, in a new tmux window.`
+  }
+  return null
+}

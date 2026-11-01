@@ -246,8 +246,15 @@ on its screen and, the first of them, under its title in the list:
   including the one that opened it with `gh pr create`;
 - **cloud sessions** Start began on it.
 
-A pick copies the command that takes you back to it (`claude --resume …` or
-`claude attach …`), or opens a cloud session's page.
+A pick takes you to it, where your terminal can (Claude Code itself can't
+switch to another session):
+
+- **In [herdr](https://herdr.dev)**: to its pane, if it's running in one;
+  otherwise a new herdr tab, in its folder, resumes it.
+- **In tmux**: a new window resumes it.
+- **A cloud session**: its page opens.
+- **Anywhere else**: the command that resumes it (`claude --resume …`, or
+  `claude attach …` for a background session) is copied.
 
 ## With the Linear mod
 

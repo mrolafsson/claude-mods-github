@@ -17,7 +17,7 @@ import {
 } from './gh'
 import type { Group } from './gh'
 import {
-  agentCommand, agentsOf, clone, clonePath, createWorktree, existingWorktree, findCheckout, localBranch, removeWorktree,
+  agentCommand, agentsOf, goTo, clone, clonePath, createWorktree, existingWorktree, findCheckout, localBranch, removeWorktree,
   repoOfRemote, startCloud, startPrompt,
 } from './local'
 
@@ -443,6 +443,15 @@ async function repoChoices($: EngineInterface) {
   const ordered = orgs.flatMap(o => shown.filter(r => r.startsWith(`${o}/`)).sort((a, b) => Number(b === own) - Number(a === own)))
   const typed = /^[\w.-]+\/[\w.-]+$/.test(f) && !known.some(r => r.toLowerCase() === f) ? f : null
   return { own, recent, ordered, typed }
+}
+
+// To one of a PR's sessions: there, where the terminal can take the person
+// (herdr, tmux), else its command copied. The demo says what it would do.
+async function goToAgent($: EngineInterface, a: Agent, surface: any) {
+  if (await read($, isDemo)) return say($, `Demo: this would switch to ${a.name}: its herdr pane, or a new tab or tmux window resuming it.`)
+  const done = await goTo($, a).catch(() => null)
+  if (done) return say($, done)
+  await copy($, agentCommand(a), surface, `The command for ${a.name}`)
 }
 
 // ── The pane ────────────────────────────────────────────────────────────────
@@ -914,7 +923,7 @@ export const register: Register = on => {
           )}
           {v.menu === 'agents' && (
             <Box flexDirection="column" borderStyle="round" borderColor="success" paddingX={1}>
-              <Text weight="bold">Its Claude Code sessions: a pick copies the command that takes you there, or opens a cloud one</Text>
+              <Text weight="bold">Its Claude Code sessions: a pick goes to it (in herdr or tmux), opens a cloud one, or copies the command</Text>
               {as.length === 0 && <Text dimColor>None known: none on its branch, and no transcript of the last 30 days names it.</Text>}
               {as.map((a, n) => a.link ? (
                 <Box key={`goto-${a.session}`} flexDirection="row" gap={1}>
@@ -922,7 +931,7 @@ export const register: Register = on => {
                   <Link href={a.link} label={a.name} />
                 </Box>
               ) : (
-                <Button key={`goto-${a.session}`} plain hotkey={n < 9 ? String(n + 1) : undefined} label={a.name} onPress={p => copy($, agentCommand(a), p.surface, `The command for ${a.name}`)}>
+                <Button key={`goto-${a.session}`} plain hotkey={n < 9 ? String(n + 1) : undefined} label={a.name} onPress={p => goToAgent($, a, p.surface)}>
                   <Text color={agentColor(a)}>{agentMark(a)}</Text> {a.name} <Text dimColor>· {agentCommand(a)}</Text>
                 </Button>
               ))}

@@ -74,6 +74,17 @@ const PRS: DemoPR[] = [
     threads: [], conversation: [], mergeState: 'CLEAN', changedFiles: 2,
   },
   {
+    // An earlier try at HAL-212, closed in favour of #482.
+    number: 466, repo: 'halcyon/notes-app', title: 'Last-write-wins for offline edits', author: 'sam',
+    head: 'sam/hal-212-last-write-wins', base: 'main', isDraft: false, review: null, mergeable: 'MERGEABLE',
+    checks: 'SUCCESS', additions: 58, deletions: 12, labels: [['sync', '1a7f37']], hoursAgo: 96,
+    requested: [], reviewers: [['priya', 'COMMENTED']],
+    checkList: [['build', 'pass', true], ['test (ubuntu)', 'pass', true]],
+    body: 'The simplest fix: the later edit wins. Closed: it still loses the other device\'s work, which #482 keeps.',
+    threads: [], conversation: [['priya', 'This still drops the other edit. Three-way merge?', 90], ['sam', 'Agreed, closing for #482.', 72]],
+    mergeState: 'CLEAN', changedFiles: 2,
+  },
+  {
     number: 476, repo: 'halcyon/notes-app', title: 'Spike: CRDT-backed notes', author: 'sam',
     head: 'sam/crdt-spike', base: 'main', isDraft: true, review: null, mergeable: 'MERGEABLE',
     checks: 'PENDING', additions: 1204, deletions: 88, labels: [], hoursAgo: 48,
@@ -134,6 +145,9 @@ const changed: Record<number, { isDraft?: boolean; state?: string; autoMerge?: s
 
 // The demo repo whose main branch merges through a merge queue.
 const QUEUE_REPOS = ['halcyon/sync-server']
+
+// Closed from the start: only reached through its link, from Linear's HAL-212.
+changed[466] = { state: 'CLOSED' }
 
 const idOf = (p: DemoPR) => `PR_${p.repo}#${p.number}`
 
