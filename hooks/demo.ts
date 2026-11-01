@@ -64,6 +64,16 @@ const PRS: DemoPR[] = [
     conversation: [['jonas', 'Close: one locking question inline.', 6]], mergeState: 'BLOCKED', changedFiles: 4,
   },
   {
+    // sync-server merges through a merge queue: this one is ready to join it.
+    number: 121, repo: 'halcyon/sync-server', title: 'Back off on 429s from the push service', author: 'sam',
+    head: 'sam/push-backoff', base: 'main', isDraft: false, review: 'APPROVED', mergeable: 'MERGEABLE',
+    checks: 'SUCCESS', additions: 64, deletions: 9, labels: [['sync', '1a7f37']], hoursAgo: 3,
+    requested: [], reviewers: [['jonas', 'APPROVED']],
+    checkList: [['build', 'pass', true], ['test', 'pass', true]],
+    body: 'Retries a rate-limited push with exponential backoff and jitter, up to five tries, instead of dropping it.',
+    threads: [], conversation: [], mergeState: 'CLEAN', changedFiles: 2,
+  },
+  {
     number: 476, repo: 'halcyon/notes-app', title: 'Spike: CRDT-backed notes', author: 'sam',
     head: 'sam/crdt-spike', base: 'main', isDraft: true, review: null, mergeable: 'MERGEABLE',
     checks: 'PENDING', additions: 1204, deletions: 88, labels: [], hoursAgo: 48,
@@ -120,7 +130,10 @@ const PRS: DemoPR[] = [
 const REPOS = ['halcyon/notes-app', 'halcyon/sync-server', 'halcyon/web', 'halcyon/design', 'sam/dotfiles']
 
 // Changes made in the demo, for this session.
-const changed: Record<number, { isDraft?: boolean; state?: string; autoMerge?: string | null }> = {}
+const changed: Record<number, { isDraft?: boolean; state?: string; autoMerge?: string | null; queued?: boolean }> = {}
+
+// The demo repo whose main branch merges through a merge queue.
+const QUEUE_REPOS = ['halcyon/sync-server']
 
 const idOf = (p: DemoPR) => `PR_${p.repo}#${p.number}`
 
@@ -147,6 +160,7 @@ function node(p: DemoPR) {
     commits: { nodes: [{ commit: { statusCheckRollup: p.checks ? { state: p.checks } : null } }] },
     labels: { nodes: p.labels.map(([name, color]) => ({ name, color })) },
     autoMergeRequest: (c.autoMerge !== undefined ? c.autoMerge : null) ? { mergeMethod: c.autoMerge } : null,
+    mergeQueueEntry: c.queued ? { position: 1, state: 'AWAITING_CHECKS', estimatedTimeToMerge: 540 } : null,
   }
 }
 
@@ -159,6 +173,7 @@ function detail(p: DemoPR) {
     changedFiles: p.changedFiles,
     headRefOid: `0${p.number}abc`,
     headRef: { id: `REF_${p.number}` },
+    isMergeQueueEnabled: QUEUE_REPOS.includes(p.repo),
     viewerCanMergeAsAdmin: false,
     repository: {
       nameWithOwner: p.repo,
@@ -222,6 +237,10 @@ export function demoGql(query: string, vars: Record<string, string | number | nu
     const c = (changed[p.number] ??= {})
     if (query.includes('markPullRequestReadyForReview')) c.isDraft = false
     else if (query.includes('convertPullRequestToDraft')) c.isDraft = true
+    else if (query.includes('enqueuePullRequest')) {
+      c.queued = true
+      return { enqueuePullRequest: { mergeQueueEntry: { position: 1, state: 'AWAITING_CHECKS' } } }
+    } else if (query.includes('dequeuePullRequest')) c.queued = false
     else if (query.includes('mergePullRequest')) c.state = 'MERGED'
     else if (query.includes('enablePullRequestAutoMerge')) c.autoMerge = String(vars.method)
     else if (query.includes('disablePullRequestAutoMerge')) c.autoMerge = null

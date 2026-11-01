@@ -43,6 +43,7 @@ fragment PR on PullRequest {
   commits(last: 1) { nodes { commit { statusCheckRollup { state } } } }
   labels(first: 6) { nodes { name color } }
   autoMergeRequest { enabledAt mergeMethod }
+  mergeQueueEntry { position state }
 }`
 
 export const SEARCH = `query($q: String!, $first: Int!, $after: String) {
@@ -64,6 +65,8 @@ export const DETAIL = `query($id: ID!, $n: Int!) {
     ... on PullRequest {
       ...PR
       body mergeStateStatus changedFiles headRefOid
+      isMergeQueueEnabled
+      mergeQueueEntry { estimatedTimeToMerge }
       headRef { id }
       viewerCanMergeAsAdmin
       repository {
@@ -115,6 +118,12 @@ export const AUTO_ON = `mutation($id: ID!, $method: PullRequestMergeMethod!) {
   enablePullRequestAutoMerge(input: {pullRequestId: $id, mergeMethod: $method}) { pullRequest { id } }
 }`
 export const AUTO_OFF = `mutation($id: ID!) { disablePullRequestAutoMerge(input: {pullRequestId: $id}) { pullRequest { id } } }`
+// Through a merge queue, where the base branch has one: GitHub merges it
+// when its turn comes, by the queue's own method.
+export const ENQUEUE = `mutation($id: ID!, $oid: GitObjectID!) {
+  enqueuePullRequest(input: {pullRequestId: $id, expectedHeadOid: $oid}) { mergeQueueEntry { position state } }
+}`
+export const DEQUEUE = `mutation($id: ID!) { dequeuePullRequest(input: {id: $id}) { mergeQueueEntry { id } } }`
 export const DELETE_REF = `mutation($id: ID!) { deleteRef(input: {refId: $id}) { clientMutationId } }`
 
 // A PR's key, as the pane names it: owner/repo#n.
@@ -142,6 +151,7 @@ export function toPR(n: any): PR {
     checks: n.commits?.nodes?.[0]?.commit?.statusCheckRollup?.state ?? null,
     labels: (n.labels?.nodes ?? []).map((l: any) => ({ name: String(l.name), color: String(l.color ?? '') })),
     autoMerge: n.autoMergeRequest?.mergeMethod ?? null,
+    queue: n.mergeQueueEntry ? { position: Number(n.mergeQueueEntry.position ?? 0), state: String(n.mergeQueueEntry.state ?? 'QUEUED') } : null,
   }
 }
 
@@ -192,6 +202,8 @@ export function toDetail(n: any): Detail {
     changedFiles: Number(n.changedFiles ?? 0),
     headOid: String(n.headRefOid ?? ''),
     headRefId: n.headRef?.id ?? null,
+    queueEnabled: Boolean(n.isMergeQueueEnabled),
+    queueEta: n.mergeQueueEntry?.estimatedTimeToMerge ?? null,
     checkList: (n.last?.nodes?.[0]?.commit?.statusCheckRollup?.contexts?.nodes ?? []).map(toCheck),
     reviews: latest,
     requested: (n.reviewRequests?.nodes ?? [])
@@ -236,6 +248,7 @@ export function groupOf(pr: PR, inReview: boolean): Group {
   const mark = checkMark(pr.checks)
   if (pr.state === 'MERGED' || pr.state === 'CLOSED') return 'done'
   if (pr.isDraft) return 'drafts'
+  if (pr.queue) return 'waiting'
   if (mark === '✗' || pr.mergeable === 'CONFLICTING' || pr.reviewDecision === 'CHANGES_REQUESTED') return 'fixing'
   if (inReview) return 'review'
   if (mark === '●') return 'waiting'
@@ -259,6 +272,7 @@ export function readiness(d: Detail): { text: string; color: string } {
   if (d.state === 'CLOSED') return { text: 'Closed without merging', color: 'error' }
   if (d.isDraft) return { text: 'Draft: mark it ready for review (d) before it can merge', color: 'subtle' }
   if (d.mergeable === 'CONFLICTING' || d.mergeStateStatus === 'DIRTY') return { text: `Conflicts with ${d.base}: resolve them before merging`, color: 'error' }
+  if (d.queue) return queued(d)
   const failing = d.checkList.filter(c => c.isRequired && c.outcome === 'fail').length
   const pending = d.checkList.filter(c => c.isRequired && c.outcome === 'pending').length
   let text = ''
@@ -287,6 +301,7 @@ export function readiness(d: Detail): { text: string; color: string } {
     default:
       text = 'GitHub is still working out whether it can merge (r to reload)'
   }
+  if (d.queueEnabled && color === 'success') text = `${text}: through the merge queue`
   if (!d.settings.canMerge) text += " · you can't merge in this repo"
   return { text, color }
 }
@@ -298,4 +313,23 @@ export function age(iso: string, now = Date.now()): string {
   if (m < 60) return `${m}m`
   if (m < 48 * 60) return `${Math.round(m / 60)}h`
   return `${Math.round(m / 1440)}d`
+}
+
+// Where it is in the merge queue, in words.
+export const ordinal = (n: number) => `${n}${n % 100 >= 11 && n % 100 <= 13 ? 'th' : ['th', 'st', 'nd', 'rd'][n % 10] ?? 'th'}`
+const QUEUE_STATES: Record<string, string> = {
+  QUEUED: 'waiting its turn',
+  AWAITING_CHECKS: 'its checks are running',
+  MERGEABLE: 'about to merge',
+  UNMERGEABLE: "it can't merge, and will be taken out",
+  LOCKED: 'merging now',
+}
+
+export function queued(d: Detail): { text: string; color: string } {
+  const q = d.queue!
+  const eta = d.queueEta ? ` · about ${Math.max(1, Math.round(d.queueEta / 60))} min` : ''
+  return {
+    text: `In the merge queue, ${ordinal(q.position)} in line: ${QUEUE_STATES[q.state] ?? q.state.toLowerCase()}${eta}`,
+    color: q.state === 'UNMERGEABLE' ? 'error' : 'suggestion',
+  }
 }

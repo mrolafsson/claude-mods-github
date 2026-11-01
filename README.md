@@ -20,8 +20,8 @@ the conversation.
   conversation.
 - **Draft ↔ ready** with one key.
 - **Merge** with any method the repo allows, your last one first, after a
-  confirmation pinned to the commit you were looking at. Not mergeable yet?
-  **Auto-merge** instead. Then, if you like, delete the branch and remove the
+  confirmation pinned to the commit you were looking at, or through the
+  repo's **merge queue**. Not mergeable yet? **Auto-merge** instead. Then, if you like, delete the branch and remove the
   worktree.
 - **Start in cloud**: a Claude Code cloud session on the PR, told to check
   out its branch, read the review threads and the failing checks, and push
@@ -196,6 +196,13 @@ The mouse works too: a click opens a row, a tab or a link.
   where the repo allows it, with the method that would be used. **Turn off
   auto-merge** if it's on.
 - **Can't**: why, in a line (a draft, conflicts, closed, no permission).
+- **Through a merge queue**, where the base branch has one: **Add it to the
+  merge queue** (when it's ready, or only waiting on checks), and once in,
+  **Take it out of the merge queue**. There's no method to choose: the queue
+  merges it its own way. The screen then says where it is (*In the merge
+  queue, 2nd in line: its checks are running · about 9 min*), a line runs
+  while it waits, and the list marks it `queued 2nd`. The demo's
+  `halcyon/sync-server` has a queue: try #121.
 
 A pick asks once more, naming exactly what happens (*Squash and merge #482
 into main now?*). The merge is pinned to the commit the screen showed: if

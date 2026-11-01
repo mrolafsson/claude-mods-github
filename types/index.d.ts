@@ -26,6 +26,8 @@ export type PR = {
   checks: string | null
   labels: { name: string; color: string }[]
   autoMerge: string | null
+  // Its place in the merge queue, if it's in one.
+  queue: { position: number; state: string } | null
 }
 
 export type Check = {
@@ -57,6 +59,10 @@ export type Detail = PR & {
   changedFiles: number
   headOid: string
   headRefId: string | null
+  // Whether the base branch merges through a merge queue; the queue's guess
+  // at how long until it merges, in seconds.
+  queueEnabled: boolean
+  queueEta: number | null
   checkList: Check[]
   // Each reviewer's latest word, and those asked who haven't answered.
   reviews: { author: string; state: string }[]

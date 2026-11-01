@@ -12,7 +12,7 @@ import type { EngineInterface, Register } from 'claude-code'
 import type { Agent, Detail, Loaded, Notice, PR, Tab, View } from '../types'
 import { DEMO_NOW } from './demo'
 import {
-  AUTO_OFF, AUTO_ON, BY_NUMBER, DELETE_REF, DETAIL, GROUPS, METHOD_NAMES, METHOD_VERBS, MERGE, READY, REPOS, SEARCH,
+  AUTO_OFF, AUTO_ON, BY_NUMBER, DELETE_REF, DEQUEUE, DETAIL, ENQUEUE, ordinal, GROUPS, METHOD_NAMES, METHOD_VERBS, MERGE, READY, REPOS, SEARCH,
   TAB_QUERY, TO_DRAFT, age, checkMark, gql, groupOf, keyOf, mergeableNow, readiness, toDetail, toPR,
 } from './gh'
 import type { Group } from './gh'
@@ -279,6 +279,14 @@ async function mergeOptions($: EngineInterface, d: Detail): Promise<{ key: strin
   if (d.isDraft) return "A draft can't merge: mark it ready for review first (d)."
   if (d.mergeable === 'CONFLICTING' || d.mergeStateStatus === 'DIRTY') return `It conflicts with ${d.base}: resolve that first.`
   if (!d.settings.canMerge) return "You can't merge in this repo."
+  // A base branch with a merge queue: the queue merges it, by its own
+  // method, once it's through. In, it can be taken out; ready, put in.
+  if (d.queueEnabled) {
+    if (d.queue) return [{ key: 'dequeue', label: 'Take it out of the merge queue' }]
+    const onlyWaiting = d.mergeStateStatus === 'BLOCKED' && d.reviewDecision !== 'CHANGES_REQUESTED' && d.reviewDecision !== 'REVIEW_REQUIRED' && !d.checkList.some(c => c.isRequired && c.outcome === 'fail')
+    if (mergeableNow(d) || onlyWaiting) return [{ key: 'queue', label: `Add it to the merge queue for ${d.base}` }]
+    return `It can't join the merge queue yet: ${readiness(d).text}.`
+  }
   const ms = await methods($, d)
   const out: { key: string; label: string }[] = []
   if (mergeableNow(d)) for (const m of ms) out.push({ key: `merge:${m}`, label: METHOD_NAMES[m]! })
@@ -293,6 +301,8 @@ function confirmText(d: Detail, pick: string): string {
   const [kind, m] = pick.split(':')
   if (kind === 'merge') return `${METHOD_VERBS[m!]} #${d.number} into ${d.base} now?`
   if (kind === 'auto') return `Turn on auto-merge (${METHOD_NAMES[m!]!.toLowerCase()}) for #${d.number}?`
+  if (kind === 'queue') return `Add #${d.number} to the merge queue for ${d.base}? It merges when its turn comes.`
+  if (kind === 'dequeue') return `Take #${d.number} out of the merge queue?`
   return `Turn off auto-merge for #${d.number}?`
 }
 
@@ -301,6 +311,16 @@ async function doPick($: EngineInterface, d: Detail, pick: string) {
   const [kind, m] = pick.split(':')
   const key = keyOf(d)
   try {
+    if (kind === 'queue' || kind === 'dequeue') {
+      // Pinned to the commit on screen, as a merge is.
+      const r = await gql($, demo, kind === 'queue' ? ENQUEUE : DEQUEUE, kind === 'queue' ? { id: d.id, oid: d.headOid } : { id: d.id })
+      const at = r?.enqueuePullRequest?.mergeQueueEntry?.position
+      await say($, kind === 'queue' ? `#${d.number} is in the merge queue${at ? `, ${ordinal(Number(at))} in line` : ''}.` : `#${d.number} is out of the merge queue.`)
+      await update($, view, (v): View => (v.screen === 'pr' ? { ...v, menu: null, pick: null } : v))
+      await reloadPR($, key)
+      void load($, await read($, tab))
+      return
+    }
     if (kind === 'merge') {
       // Pinned to the commit on screen: GitHub refuses if anyone pushed since.
       await gql($, demo, MERGE, { id: d.id, method: m!, oid: d.headOid })
@@ -656,6 +676,8 @@ export const register: Register = on => {
     const table = $.ui.resolve(e)
     const { Box, Text, Button, Markdown, Link } = table
     const Input = 'Input' in table ? table.Input : null
+    // The surface's own animated regions, where it has them.
+    const Client = 'Client' in table ? (table as any).Client : null
     const v = await read($, view)
     const note = await read($, notice)
     const demo = await read($, isDemo)
@@ -691,6 +713,7 @@ export const register: Register = on => {
       else if (pr.reviewDecision === 'APPROVED') parts.push(['approved', 'success'])
       if (mark) parts.push([`${mark} checks`, mark === '✓' ? 'success' : mark === '✗' ? 'error' : 'warning'])
       if (pr.autoMerge) parts.push(['auto-merge', 'suggestion'])
+      if (pr.queue) parts.push([`queued ${ordinal(pr.queue.position)}`, 'suggestion'])
       if (wt) parts.push(['worktree', 'suggestion'])
       if (as?.length) parts.push([`${agentMark(as[0]!)} ${cut(as[0]!.name, 24)}${as.length > 1 ? ` +${as.length - 1}` : ''}`, 'subtle'])
       return (
@@ -721,7 +744,13 @@ export const register: Register = on => {
       const wt = (await read($, worktrees))[key]
       const as = (await read($, agents))[key] ?? []
       const stateLook =
-        pr.state === 'MERGED' ? { t: 'Merged', c: 'merged' } : pr.state === 'CLOSED' ? { t: 'Closed', c: 'error' } : pr.isDraft ? { t: 'Draft', c: 'subtle' } : { t: 'Open', c: 'success' }
+        pr.state === 'MERGED'
+          ? { t: 'Merged', c: 'merged', mark: '⇄' }
+          : pr.state === 'CLOSED'
+            ? { t: 'Closed', c: 'error', mark: '✗' }
+            : pr.isDraft
+              ? { t: 'Draft', c: 'subtle', mark: '◌' }
+              : { t: 'Open', c: 'success', mark: '●' }
       const field = (name: string, value: any) =>
         value ? (
           <Box flexDirection="row">
@@ -744,72 +773,100 @@ export const register: Register = on => {
             <Text weight="bold">{key}</Text>
             {demo && <Text dimColor>· demo</Text>}
           </Box>
-          <Box flexDirection="row" gap={1}>
-            <Text backgroundColor={stateLook.c} color="inverseText" weight="semibold">{` ${stateLook.t} `}</Text>
-            <Text color="success">#{pr.number}</Text>
-            <Text dimColor>· {pr.repo}</Text>
+          {/* The PR. Its frame is coloured only once it's settled, merged or
+              closed: while it's open, whether it can merge is the merge frame's
+              to say, and two colours would argue. */}
+          <Box flexDirection="column" borderStyle="round" borderColor={pr.state === 'OPEN' ? 'subtle' : stateLook.c} paddingX={1}>
+            <Box flexDirection="row" justifyContent="space-between">
+              <Text color={pr.state === 'OPEN' ? undefined : stateLook.c} weight="bold" wrap="truncate-end">#{pr.number} · {pr.repo}</Text>
+              <Box flexShrink={0}><Text color={stateLook.c}>{stateLook.mark} {stateLook.t.toLowerCase()}</Text></Box>
+            </Box>
+            <Text weight="bold" wrap="wrap">{pr.title}</Text>
+            <Text> </Text>
+              {field('Author', <Text>{pr.author}<Text dimColor> · updated {age(pr.updatedAt, now)} ago</Text></Text>)}
+              {field('Branch', (
+                <Text>
+                  <Text color="planMode">{pr.head}</Text> <Text dimColor>→</Text> <Text color="planMode">{pr.base}</Text>
+                  {wt ? <Text color="suggestion">  ⌥ worktree</Text> : ''}
+                </Text>
+              ))}
+              {as.length > 0 && field('Agents', (
+                <Box flexDirection="column">
+                  {as.map(a => (
+                    <Text key={`ag-${a.session}`}>
+                      <Text color={agentColor(a)}>{agentMark(a)}</Text> {a.name}
+                      <Text dimColor> · {a.status === 'gone' ? 'not running' : a.status} · {a.how === 'opened' ? 'opened it' : a.how === 'branch' ? 'on its branch' : a.how === 'cloud' ? 'started here' : 'worked on it'}</Text>
+                    </Text>
+                  ))}
+                </Box>
+              ))}
+              {field('Changes', <Text><Text color="success">+{pr.additions}</Text> <Text color="error">−{pr.deletions}</Text>{d ? <Text dimColor> · {plural(d.changedFiles, 'file')}</Text> : ''}</Text>)}
+              {pr.labels.length > 0 && field('Labels', (
+                <Text wrap="wrap">
+                  {pr.labels.map((l, n) => (
+                    <Text key={`lb-${n}`}>{n ? '  ' : ''}<Text color={/^[0-9a-f]{6}$/i.test(l.color) ? `#${l.color}` : 'subtle'}>●</Text> {l.name}</Text>
+                  ))}
+                </Text>
+              ))}
+              {ticket && field('Linear', (
+                hasLinear
+                  ? <Button key="linear" plain hotkey="l" label={ticket} onPress={() => openLinear($, ticket)}><Text color="success" underline>{ticket}</Text></Button>
+                  : <Text color="success">{ticket}</Text>
+              ))}
           </Box>
-          <Text weight="bold" wrap="wrap">{pr.title}</Text>
-          <Box flexDirection="column">
-            {field('Author', <Text>{pr.author}<Text dimColor> · updated {age(pr.updatedAt, now)} ago</Text></Text>)}
-            {field('Branch', (
-              <Text>
-                <Text color="planMode">{pr.head}</Text> <Text dimColor>→</Text> <Text color="planMode">{pr.base}</Text>
-                {wt ? <Text color="suggestion">  ⌥ worktree</Text> : ''}
-              </Text>
-            ))}
-            {as.length > 0 && field('Agents', (
-              <Box flexDirection="column">
-                {as.map(a => (
-                  <Text key={`ag-${a.session}`}>
-                    <Text color={agentColor(a)}>{agentMark(a)}</Text> {a.name}
-                    <Text dimColor> · {a.status === 'gone' ? 'not running' : a.status} · {a.how === 'opened' ? 'opened it' : a.how === 'branch' ? 'on its branch' : a.how === 'cloud' ? 'started here' : 'worked on it'}</Text>
-                  </Text>
-                ))}
+          {/* Whether it can merge, framed in that answer's colour: the checks as a
+              bar, the reviewers, and a line that runs while checks still do. */}
+          {d && ready && (
+            <Box flexDirection="column" borderStyle="round" borderColor={ready.color} paddingX={1}>
+              <Box flexDirection="row" justifyContent="space-between">
+                <Text color={ready.color} weight="bold">MERGE <Text dimColor>· into</Text> <Text color="planMode">{d.base}</Text></Text>
+                <Box flexShrink={0}><Text dimColor>{plural(d.checkList.length, 'check')}</Text></Box>
               </Box>
-            ))}
-            {field('Changes', <Text><Text color="success">+{pr.additions}</Text> <Text color="error">−{pr.deletions}</Text>{d ? <Text dimColor> · {plural(d.changedFiles, 'file')}</Text> : ''}</Text>)}
-            {pr.labels.length > 0 && field('Labels', (
-              <Text wrap="wrap">
-                {pr.labels.map((l, n) => (
-                  <Text key={`lb-${n}`}>{n ? '  ' : ''}<Text color={/^[0-9a-f]{6}$/i.test(l.color) ? `#${l.color}` : 'subtle'}>●</Text> {l.name}</Text>
-                ))}
-              </Text>
-            ))}
-            {d && (d.reviews.length > 0 || d.requested.length > 0) && field('Reviews', (
-              <Text wrap="wrap">
-                {d.reviews.map((r, n) => (
-                  <Text key={`rv-${n}`}>
-                    {n ? <Text dimColor> · </Text> : ''}
-                    <Text color={r.state === 'APPROVED' ? 'success' : r.state === 'CHANGES_REQUESTED' ? 'error' : 'subtle'}>
-                      {r.state === 'APPROVED' ? '✓' : r.state === 'CHANGES_REQUESTED' ? '✗' : '·'}
-                    </Text> {r.author}
+              <Text color={ready.color} wrap="wrap">{ready.text}</Text>
+              {d.checkList.length > 0 && (
+                <Box flexDirection="column" marginTop={1}>
+                  <Text>
+                    {bar(d.checkList, Math.min(48, width - 6)).map((b, n) => (
+                      <Text key={`bar-${n}`} color={b.color} dimColor={b.dim || undefined}>{b.text}</Text>
+                    ))}
                   </Text>
-                ))}
-                {d.requested.map((r, n) => (
-                  <Text key={`rq-${n}`}>{d.reviews.length + n ? <Text dimColor> · </Text> : ''}<Text dimColor>○</Text> {r}</Text>
-                ))}
-              </Text>
-            ))}
-            {d && d.checkList.length > 0 && field('Checks', (
-              <Text>
-                {failing.length ? <Text color="error">✗ {failing.length} failing  </Text> : ''}
-                {pending.length ? <Text color="warning">● {pending.length} running  </Text> : ''}
-                {passed ? <Text color="success">✓ {passed} passed</Text> : ''}
-              </Text>
-            ))}
-            {ticket && field('Linear', (
-              hasLinear
-                ? <Button key="linear" plain hotkey="l" label={ticket} onPress={() => openLinear($, ticket)}><Text color="success" underline>{ticket}</Text></Button>
-                : <Text color="success">{ticket}</Text>
-            ))}
-            {ready && field('Merge', <Text color={ready.color} wrap="wrap">{ready.text}</Text>)}
-          </Box>
+                  <Text>
+                    {passed ? <Text color="success">✓ {passed} passed  </Text> : ''}
+                    {pending.length ? <Text color="warning">● {pending.length} running  </Text> : ''}
+                    {failing.length ? <Text color="error">✗ {failing.length} failing</Text> : ''}
+                  </Text>
+                  {[...failing, ...pending].map((c, n) => (
+                    <Text key={`ck-${n}`} wrap="truncate-end">
+                      <Text color={c.outcome === 'fail' ? 'error' : 'warning'}>{c.outcome === 'fail' ? '✗' : '●'}</Text> {c.name}
+                      {c.isRequired ? <Text dimColor> · required</Text> : ''}
+                    </Text>
+                  ))}
+                </Box>
+              )}
+              {(d.reviews.length > 0 || d.requested.length > 0) && (
+                <Text wrap="wrap">
+                  <Text dimColor>reviews </Text>
+                  {d.reviews.map((r, n) => (
+                    <Text key={`rv-${n}`}>
+                      {n ? <Text dimColor> · </Text> : ''}
+                      <Text color={r.state === 'APPROVED' ? 'success' : r.state === 'CHANGES_REQUESTED' ? 'error' : 'subtle'}>
+                        {r.state === 'APPROVED' ? '✓' : r.state === 'CHANGES_REQUESTED' ? '✗' : '·'}
+                      </Text> {r.author}
+                    </Text>
+                  ))}
+                  {d.requested.map((r, n) => (
+                    <Text key={`rq-${n}`}>{d.reviews.length + n ? <Text dimColor> · </Text> : ''}<Text dimColor>○</Text> {r}</Text>
+                  ))}
+                </Text>
+              )}
+              {(pending.length > 0 || d.queue) && Client && <Client key="checks-rail" module="./rail.tsx" props={{ active: true, color: d.queue ? 'suggestion' : 'warning', width: width - 6 }} />}
+            </Box>
+          )}
           {noticeRow}
 
           {/* The menus: merge, its confirmation, after a merge, the agents, a clone. */}
           {d && v.menu === 'merge' && (
-            <Box flexDirection="column">
+            <Box flexDirection="column" borderStyle="round" borderColor="claude" paddingX={1}>
               <Text weight="bold">Merge #{d.number} into {d.base}</Text>
               {typeof opts === 'string' ? (
                 <Text dimColor wrap="wrap">{opts}</Text>
@@ -822,7 +879,7 @@ export const register: Register = on => {
             </Box>
           )}
           {d && v.menu === 'confirm' && v.pick && (
-            <Box flexDirection="column">
+            <Box flexDirection="column" borderStyle="round" borderColor="claude" paddingX={1}>
               <Text weight="bold" wrap="wrap">{confirmText(d, v.pick)}</Text>
               <Box flexDirection="row" gap={2}>
                 {pill({ id: 'yes', hotkey: '1', label: 'yes', color: 'success', onPress: () => doPick($, d, v.pick!) })}
@@ -831,7 +888,7 @@ export const register: Register = on => {
             </Box>
           )}
           {d && v.menu === 'after' && (
-            <Box flexDirection="column">
+            <Box flexDirection="column" borderStyle="round" borderColor="success" paddingX={1}>
               <Text weight="bold">#{d.number} is merged. Tidy up?</Text>
               {!d.settings.deleteBranchOnMerge && !d.isCrossRepository && d.headRefId && (
                 <Button key="after-branch" plain hotkey="1" label={`Delete the branch ${d.head} on GitHub`} onPress={() => deleteBranch($, d)} />
@@ -856,7 +913,7 @@ export const register: Register = on => {
             </Box>
           )}
           {v.menu === 'agents' && (
-            <Box flexDirection="column">
+            <Box flexDirection="column" borderStyle="round" borderColor="success" paddingX={1}>
               <Text weight="bold">Its Claude Code sessions: a pick copies the command that takes you there, or opens a cloud one</Text>
               {as.length === 0 && <Text dimColor>None known: none on its branch, and no transcript of the last 30 days names it.</Text>}
               {as.map((a, n) => a.link ? (
@@ -873,7 +930,7 @@ export const register: Register = on => {
             </Box>
           )}
           {v.menu === 'clone' && (
-            <Box flexDirection="column">
+            <Box flexDirection="column" borderStyle="round" borderColor="claude" paddingX={1}>
               <Text weight="bold" wrap="wrap">There's no checkout of {pr.repo} here. Clone it?</Text>
               <Button
                 key="clone-yes"
@@ -909,26 +966,18 @@ export const register: Register = on => {
             </Box>
           )}
 
-          {d && (failing.length > 0 || pending.length > 0) && (
-            <Box flexDirection="column">
-              <Text color="suggestion" weight="semibold">Checks</Text>
-              {[...failing, ...pending].map((c, n) => (
-                <Text key={`ck-${n}`} wrap="truncate-end">
-                  <Text color={c.outcome === 'fail' ? 'error' : 'warning'}>{c.outcome === 'fail' ? '✗' : '●'}</Text> {c.name}
-                  {c.isRequired ? <Text dimColor> · required</Text> : ''}
-                </Text>
-              ))}
-            </Box>
-          )}
           {d && (
-            <Box flexDirection="column">
-              <Text color="suggestion" weight="semibold">Description</Text>
+            <Box flexDirection="column" borderStyle="round" borderColor="subtle" paddingX={1}>
+              <Text color="suggestion" weight="bold">DESCRIPTION</Text>
               {d.body.trim() ? <Markdown key={`md-${key}`} text={d.body} /> : <Text dimColor>No description.</Text>}
             </Box>
           )}
           {d && d.threads.length > 0 && (
-            <Box flexDirection="column" gap={1}>
-              <Text color="suggestion" weight="semibold">Unresolved threads {d.threads.length}</Text>
+            <Box flexDirection="column" gap={1} borderStyle="round" borderColor="warning" paddingX={1}>
+              <Box flexDirection="row" justifyContent="space-between">
+                <Text color="warning" weight="bold">THREADS <Text dimColor>· unresolved</Text></Text>
+                <Text dimColor>{d.threads.length}</Text>
+              </Box>
               {d.threads.map((th, n) => (
                 <Box key={`th-${n}`} flexDirection="column">
                   <Text color="planMode">{th.path}{th.line ? `:${th.line}` : ''}{th.isOutdated ? <Text dimColor> · outdated</Text> : ''}</Text>
@@ -940,8 +989,8 @@ export const register: Register = on => {
             </Box>
           )}
           {d && d.conversation.length > 0 && (
-            <Box flexDirection="column" gap={1}>
-              <Text color="suggestion" weight="semibold">Conversation</Text>
+            <Box flexDirection="column" gap={1} borderStyle="round" borderColor="subtle" paddingX={1}>
+              <Text color="suggestion" weight="bold">CONVERSATION</Text>
               {d.conversation.map((c, n) => (
                 <Box key={`cv-${n}`} flexDirection="column">
                   <Text><Text weight="semibold">{c.author}</Text><Text dimColor> · {age(c.createdAt, now)} ago{c.state ? ` · ${c.state.toLowerCase().replace(/_/g, ' ')}` : ''}</Text></Text>
@@ -1050,7 +1099,7 @@ export const register: Register = on => {
       for (const pr of list) items.push({ kind: 'pr', pr })
     }
     const height = (it: Item) => (it.kind === 'head' ? 2 : 3)
-    room = Math.max(6, (e.props.scroll?.bodyRows ?? 24) - 12 - (note ? 2 : 0) - (mine?.error ? 2 : 0))
+    room = Math.max(6, (e.props.scroll?.bodyRows ?? 24) - 13 - (note ? 2 : 0) - (mine?.error ? 2 : 0))
     const at = picked ? items.findIndex(it => it.kind === 'pr' && it.pr === picked) : 0
     let startAt = at
     let used = height(items[at] ?? { kind: 'head', g: 'waiting', n: 0 })
@@ -1073,6 +1122,7 @@ export const register: Register = on => {
 
     return (
       <Box flexDirection="column" gap={1}>
+        <Box flexDirection="column">
         <Box flexDirection="row" gap={1} flexWrap="wrap">
           {TABS.map(k => {
             const isOn = k === t
@@ -1090,6 +1140,9 @@ export const register: Register = on => {
             <Text inverse={isArmed || undefined} color="suggestion" weight={isArmed ? 'semibold' : undefined}>{isArmed ? ' ⇄ change repo ' : '⇄'}</Text>
           </Button>
           <Text dimColor>{mine?.isLoading ? ' updating…' : ''}{demo ? ' · demo' : ''}</Text>
+        </Box>
+        {/* Under the tabs, a rule that runs while the list is being fetched. */}
+        {Client && <Client key="list-rail" module="./rail.tsx" props={{ active: Boolean(mine?.isLoading), color: 'suggestion', width }} />}
         </Box>
         {Input && (
           <Input
@@ -1164,6 +1217,22 @@ export const register: Register = on => {
       </Box>
     )
   })
+}
+
+// The checks as one bar, as Flightdeck draws its gate: a cell per share of
+// them, passed green, running amber, failing red, skipped dim.
+function bar(checks: { outcome: string }[], cells: number): { text: string; color: string; dim: boolean }[] {
+  const order = ['pass', 'pending', 'fail', 'skipped'] as const
+  const color = { pass: 'success', pending: 'warning', fail: 'error', skipped: 'subtle' }
+  const counts = order.map(o => checks.filter(c => c.outcome === o).length)
+  const total = Math.max(1, checks.length)
+  let given = 0
+  return order.map((o, i) => {
+    const n = i === order.length - 1 ? cells - given : Math.round((counts[i]! / total) * cells)
+    const take = counts[i] ? Math.max(1, Math.min(n, cells - given)) : 0
+    given += take
+    return { text: '━'.repeat(take), color: color[o], dim: o === 'skipped' }
+  }).filter(x => x.text)
 }
 
 // An agent's mark and colour, by its state: working, waiting, done, gone.
